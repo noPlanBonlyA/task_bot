@@ -31,11 +31,11 @@ from keyboards.keyboards import (
 PROJECTS = {}
 
 def get_now_str():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
 def is_project_creator(call: types.CallbackQuery, project):
     user = "@" + (call.from_user.username or "unknown")
-    return (user == project.get("creator_username"))
+    return user == project.get("creator_username")
 
 def generate_project_text(proj: dict) -> str:
     """
@@ -103,7 +103,7 @@ async def update_project_message(chat_id, proj):
             media = types.InputMediaPhoto(proj["photo_id"], caption=text)
             await bot.edit_message_media(media, chat_id, proj["message_id"], reply_markup=keyboard)
         else:
-            await bot.edit_message_text(text, chat_id, proj["message_id"], reply_markup=keyboard)
+            await bot.edit_message_text(text, chat_id, proj["message_id"], reply_markup=keyboard,  disable_web_page_preview=True)
     except Exception as e:
         if "Message is not modified" in str(e):
             pass
@@ -237,6 +237,7 @@ async def on_project_image(message: types.Message, state: FSMContext):
 async def cmd_team(message: types.Message):
     """
     Выводит сообщение с выбором: кого добавить.
+    Только создатель проекта может управлять командой.
     """
     await message.delete()
     proj = PROJECTS.get(message.chat.id)
@@ -245,7 +246,7 @@ async def cmd_team(message: types.Message):
         return
     user = "@" + (message.from_user.username or "unknown")
     if user != proj["creator_username"]:
-        await message.answer("Только creator может управлять командой.")
+        await message.answer("Только создатель проекта может управлять командой.")
         return
 
     kb = InlineKeyboardMarkup()
@@ -267,16 +268,15 @@ async def on_team_close(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "team_add_developer")
 async def on_add_dev(call: types.CallbackQuery, state: FSMContext):
     proj = PROJECTS.get(call.message.chat.id)
-    user = "@" + (call.from_user.username or "unknown")
-    if user != proj["creator_username"]:
-        await call.answer("Нет прав добавлять участника", show_alert=True)
+    # Ограничение: только создатель проекта может добавлять участников
+    if not is_project_creator(call, proj):
+        await call.answer("Только создатель проекта может управлять командой.", show_alert=True)
         return
     try:
         await call.message.delete()
     except Exception:
         pass
     ask = await bot.send_message(call.message.chat.id, "Введите @username разработчика:")
-    # Сохраняем выбранную роль и id сообщения-подсказки
     await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(team_role="developer", team_prompt_msg=ask.message_id)
     await ProjectTeamStates.waiting_for_team_username.set()
     await call.answer()
@@ -284,9 +284,8 @@ async def on_add_dev(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query_handler(lambda c: c.data == "team_add_tester")
 async def on_add_tester(call: types.CallbackQuery, state: FSMContext):
     proj = PROJECTS.get(call.message.chat.id)
-    user = "@" + (call.from_user.username or "unknown")
-    if user != proj["creator_username"]:
-        await call.answer("Нет прав добавлять участника", show_alert=True)
+    if not is_project_creator(call, proj):
+        await call.answer("Только создатель проекта может управлять командой.", show_alert=True)
         return
     try:
         await call.message.delete()
@@ -305,7 +304,6 @@ async def on_team_username(message: types.Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-    # Удаляем сообщение-подсказку, если оно сохранилось
     team_prompt_msg = data.get("team_prompt_msg")
     if team_prompt_msg:
         try:
@@ -319,7 +317,7 @@ async def on_team_username(message: types.Message, state: FSMContext):
         InlineKeyboardButton("Да", callback_data="team_confirm_username")
     )
     await state.update_data(team_username_candidate=username_candidate)
-    await bot.send_message(message.chat.id, text, reply_markup=kb)
+    await bot.send_message(message.chat.id, text, reply_markup=kb,  disable_web_page_preview=True)
     await ProjectTeamStates.waiting_for_team_confirmation.set()
 
 @dp.callback_query_handler(lambda c: c.data == "team_change_username", state=ProjectTeamStates.waiting_for_team_confirmation)
@@ -367,6 +365,10 @@ async def on_team_confirm_username(call: types.CallbackQuery, state: FSMContext)
 
 @dp.callback_query_handler(lambda c: c.data == "project_delete")
 async def on_project_delete(call: types.CallbackQuery):
+    proj = PROJECTS.get(call.message.chat.id)
+    if not is_project_creator(call, proj):
+        await call.answer("Только создатель проекта может управлять проектом.", show_alert=True)
+        return
     try:
         await bot.delete_message(call.message.chat.id, call.message.message_id)
         PROJECTS.pop(call.message.chat.id, None)
@@ -379,6 +381,9 @@ async def on_project_edit(call: types.CallbackQuery, state: FSMContext):
     proj = PROJECTS.get(call.message.chat.id)
     if not proj:
         await call.answer("Нет проекта для редактирования", show_alert=True)
+        return
+    if not is_project_creator(call, proj):
+        await call.answer("Только создатель проекта может редактировать его.", show_alert=True)
         return
     ask = await call.message.answer("Введите новое описание проекта:")
     await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(edit_desc_msg=ask.message_id)
@@ -408,7 +413,9 @@ async def on_project_confirm(call: types.CallbackQuery):
     if not proj:
         await call.answer("Нет проекта для подтверждения", show_alert=True)
         return
-
+    if not is_project_creator(call, proj):
+        await call.answer("Только создатель проекта может подтверждать его.", show_alert=True)
+        return
     proj["confirmed"] = True
     PROJECTS[call.message.chat.id] = proj
     await update_project_message(call.message.chat.id, proj)
