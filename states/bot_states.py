@@ -1,5 +1,3 @@
-# states/bot_states.py
-
 from aiogram.dispatcher.filters.state import StatesGroup, State
 
 # Проект
@@ -12,8 +10,8 @@ class EditProjectStates(StatesGroup):
     waiting_for_new_project_description = State()
 
 class ProjectTeamStates(StatesGroup):
-    waiting_for_developer = State()
-    waiting_for_tester = State()
+    waiting_for_team_username = State()
+    waiting_for_team_confirmation = State()
 
 # Таск
 class NewTaskStates(StatesGroup):

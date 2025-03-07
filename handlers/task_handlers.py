@@ -1,6 +1,5 @@
-# handlers/task_handlers.py
-
 import datetime
+import logging
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command
@@ -11,70 +10,65 @@ from states.bot_states import (
     NewTaskStates, EditTaskStates, CommentStates,
     NewGlitchStates, NewFixStates
 )
-from handlers.project_handlers import PROJECTS
+from handlers.project_handlers import PROJECTS, generate_project_text
 from keyboards.keyboards import (
     task_init_keyboard, task_after_confirm_keyboard,
     task_work_keyboard, task_test_keyboard, task_accept_keyboard,
     glitch_or_fix_keyboard, glitch_skip_image_keyboard,
-    glitch_work_keyboard, glitch_accept_keyboard
+    glitch_work_keyboard, glitch_test_keyboard, glitch_accept_keyboard,
+    fix_work_keyboard, fix_test_keyboard, fix_accept_keyboard,
+    task_skip_image_keyboard, fix_skip_image_keyboard
 )
+
+logging.basicConfig(level=logging.INFO)
 
 TASKS = {}  # TASKS[chat_id] = list of tasks / glitch / fix
 TASK_COUNTER = 1
 GLITCH_COUNTER = 1
 FIX_COUNTER = 1
 
+
 def now_str() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def build_task_text(idx: int, prefix: str, dev: str, tester: str, desc: str, status: str) -> str:
-    """
-    prefix – "ТЗ", "Глюк", "Правка"
-    idx – локальный счётчик
-    """
+
+def build_task_text(idx: int, prefix: str, creator: str, dev: str, tester: str, desc: str, status: str) -> str:
+    """Формирует текст карточки задачи/глюка/правки."""
     return (
-        f"{prefix}{idx} #{status}\n"
-        f"D: {dev}\nT: {tester}\n"
+        f"{prefix}-{idx}\n"
+        f"P: {creator}\n"
+        f"D: {dev}\n"
+        f"T: {tester}\n"
         f"Дата: {now_str()}\n"
-        f"Описание: {desc}"
+        f"Описание: {desc}\n"
+        f"#{status}"
     )
 
+
 def find_card(chat_id: int, message_id: int):
-    arr = TASKS.get(chat_id, [])
-    for obj in arr:
+    for obj in TASKS.get(chat_id, []):
         if obj["message_id"] == message_id:
             return obj
     return None
 
+
 async def update_project_card(chat_id: int):
-    """
-    Обновляем только задачи типа "ТЗ". Глюки/правки не вносим в карточку проекта.
-    """
-    from handlers.project_handlers import PROJECTS
+    """Обновляет карточку проекта для ТЗ (глюки и правки не включаются)."""
     if chat_id not in PROJECTS:
         return
-
     arr = TASKS.get(chat_id, [])
     project_obj = PROJECTS[chat_id]
-    base_text = project_obj["pinned_text"].split("\n\nЗадачи:")[0]
-
+    base_text = generate_project_text(project_obj).replace("\n-- сюда добавляются таски", "").strip()
     tasks_only = [x for x in arr if x["type"] == "ТЗ"]
     if tasks_only:
-        block = "\n\nЗадачи:"
-        for t in tasks_only:
-            idx = t["local_id"]
-            desc = t["desc"]
-            dev = t["dev"]
-            block += f"\nТЗ{idx}: {desc} ({dev})"
-        final_text = base_text + block
+        tasks_lines = "".join(f"\nТЗ-{t['local_id']}: {t['desc']} ({t['dev']})" for t in tasks_only)
+        final_text = base_text + tasks_lines
     else:
         final_text = base_text
-
     project_obj["pinned_text"] = final_text
     PROJECTS[chat_id] = project_obj
-
     msg_id = project_obj["message_id"]
-    file_id = project_obj.get("image_file_id")
+    file_id = project_obj.get("photo_id")
     try:
         if file_id:
             media = types.InputMediaPhoto(file_id, caption=final_text)
@@ -82,11 +76,15 @@ async def update_project_card(chat_id: int):
         else:
             await bot.edit_message_text(final_text, chat_id, msg_id)
     except Exception as e:
-        print(f"Ошибка при update_project_card: {e}")
+        if "Message is not modified" in str(e):
+            pass
+        else:
+            logging.error(f"Ошибка при update_project_card: {e}")
 
-#############################
-# Создание Таска /addTask
-#############################
+
+####################################
+# Создание основной задачи (ТЗ)
+####################################
 
 @dp.message_handler(Command("addTask"))
 async def cmd_add_task(message: types.Message, state: FSMContext):
@@ -94,10 +92,9 @@ async def cmd_add_task(message: types.Message, state: FSMContext):
     if message.chat.id not in PROJECTS:
         await message.answer("В этом чате нет проекта.")
         return
-
+    # Выбор разработчика
     devs = PROJECTS[message.chat.id].get("devs", [])
     testers = PROJECTS[message.chat.id].get("testers", [])
-
     if len(devs) == 0:
         await state.update_data(task_dev="@noDev")
     elif len(devs) == 1:
@@ -109,7 +106,7 @@ async def cmd_add_task(message: types.Message, state: FSMContext):
         dev_msg = await message.answer("Выберите разработчика:", reply_markup=kb)
         await state.update_data(dev_msg=dev_msg.message_id)
         return
-
+    # Выбор тестировщика
     if len(testers) == 0:
         await state.update_data(task_tester="@noTester")
     elif len(testers) == 1:
@@ -121,24 +118,22 @@ async def cmd_add_task(message: types.Message, state: FSMContext):
         test_msg = await message.answer("Выберите тестировщика:", reply_markup=kb2)
         await state.update_data(test_msg=test_msg.message_id)
         return
-
     ask_desc = await message.answer("Введите описание (ТЗ):")
     await state.update_data(ask_desc=ask_desc.message_id)
     await NewTaskStates.waiting_for_task_description.set()
 
+# Обработчики выбора разработчика/тестировщика и описания для ТЗ
 @dp.callback_query_handler(lambda c: c.data.startswith("task_dev_pick:"))
 async def on_dev_pick(call: types.CallbackQuery, state: FSMContext):
-    dev_chosen = call.data.split("task_dev_pick:")[1]
+    dev = call.data.split("task_dev_pick:")[1]
     data = await state.get_data()
-    dev_msg = data.get("dev_msg")
-    if dev_msg:
+    if data.get("dev_msg"):
         try:
-            await bot.delete_message(call.message.chat.id, dev_msg)
+            await bot.delete_message(call.message.chat.id, data["dev_msg"])
         except:
             pass
-    await state.update_data(task_dev=dev_chosen)
-    await call.answer(f"Разработчик {dev_chosen} выбран")
-
+    await state.update_data(task_dev=dev)
+    await call.answer(f"Разработчик {dev} выбран")
     testers = PROJECTS[call.message.chat.id].get("testers", [])
     if len(testers) == 0:
         await state.update_data(task_tester="@noTester")
@@ -159,17 +154,15 @@ async def on_dev_pick(call: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("task_test_pick:"))
 async def on_test_pick(call: types.CallbackQuery, state: FSMContext):
-    test_chosen = call.data.split("task_test_pick:")[1]
+    test = call.data.split("task_test_pick:")[1]
     data = await state.get_data()
-    t_msg = data.get("test_msg")
-    if t_msg:
+    if data.get("test_msg"):
         try:
-            await bot.delete_message(call.message.chat.id, t_msg)
+            await bot.delete_message(call.message.chat.id, data["test_msg"])
         except:
             pass
-    await call.answer(f"Тестировщик {test_chosen} выбран")
-    await state.update_data(task_tester=test_chosen)
-
+    await state.update_data(task_tester=test)
+    await call.answer(f"Тестировщик {test} выбран")
     ask_desc = await call.message.answer("Введите описание (ТЗ):")
     await state.update_data(ask_desc=ask_desc.message_id)
     await NewTaskStates.waiting_for_task_description.set()
@@ -177,78 +170,77 @@ async def on_test_pick(call: types.CallbackQuery, state: FSMContext):
 @dp.message_handler(state=NewTaskStates.waiting_for_task_description, content_types=types.ContentType.TEXT)
 async def on_task_desc(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    desc_ask = data.get("ask_desc")
-    if desc_ask:
+    if data.get("ask_desc"):
         try:
-            await bot.delete_message(message.chat.id, desc_ask)
+            await bot.delete_message(message.chat.id, data["ask_desc"])
         except:
             pass
     desc = message.text
     await message.delete()
-
     await state.update_data(task_description=desc)
-    ask_photo = await message.answer("Отправьте фото для задачи или 'Пропустить':",
-                                     reply_markup=glitch_skip_image_keyboard())
+    # Для задачи используем клавиатуру с callback "skip_task_image"
+    ask_photo = await message.answer("Отправьте фото для задачи или 'Пропустить':", reply_markup=task_skip_image_keyboard())
     await state.update_data(task_photo_ask=ask_photo.message_id)
     await NewTaskStates.waiting_for_task_photo.set()
 
-@dp.callback_query_handler(lambda c: c.data == "skip_glitch_image", state=NewTaskStates.waiting_for_task_photo)
+@dp.callback_query_handler(lambda c: c.data == "skip_task_image", state=NewTaskStates.waiting_for_task_photo)
 async def skip_task_photo(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    p_ask = data.get("task_photo_ask")
-    if p_ask:
-        try:
-            await bot.delete_message(call.message.chat.id, p_ask)
-        except:
-            pass
     try:
-        await call.message.delete()
-    except:
-        pass
-    await state.update_data(task_photo=None)
-    await finalize_task_creation(call.message.chat.id, state)
-    await call.answer("Пропущено фото")
-    await state.finish()
+        data = await state.get_data()
+        if data.get("task_photo_ask"):
+            try:
+                await bot.delete_message(call.message.chat.id, data["task_photo_ask"])
+            except MessageToDeleteNotFound:
+                pass
+            except Exception as e:
+                logging.error(f"Ошибка при удалении task_photo_ask: {e}")
+        try:
+            await call.message.delete()
+        except MessageToDeleteNotFound:
+            pass
+        except Exception as e:
+            logging.error(f"Ошибка при удалении сообщения: {e}")
+        await state.update_data(task_photo=None)
+        await finalize_task_creation(call.message.chat.id, state)
+        await call.answer("Пропущено фото")
+        await state.finish()
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
 
 @dp.message_handler(state=NewTaskStates.waiting_for_task_photo, content_types=types.ContentType.PHOTO)
 async def on_task_photo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    p_ask = data.get("task_photo_ask")
-    if p_ask:
-        try:
-            await bot.delete_message(message.chat.id, p_ask)
-        except:
-            pass
+    try:
+        data = await state.get_data()
+        if data.get("task_photo_ask"):
+            try:
+                await bot.delete_message(message.chat.id, data["task_photo_ask"])
+            except:
+                pass
+    except Exception as e:
+        logging.error(f"Ошибка при удалении ask_photo: {e}")
     photo_id = message.photo[-1].file_id
     await message.delete()
-
     await state.update_data(task_photo=photo_id)
     await finalize_task_creation(message.chat.id, state)
     await state.finish()
 
 async def finalize_task_creation(chat_id: int, state: FSMContext):
-    """
-    Генерируем ТЗ с TASK_COUNTER
-    """
     global TASK_COUNTER
     data = await state.get_data()
     dev = data.get("task_dev", "@noDev")
     tester = data.get("task_tester", "@noTester")
     desc = data.get("task_description", "")
     photo = data.get("task_photo")
-
+    creator = PROJECTS[chat_id].get("creator_username", "@unknown")
     idx = TASK_COUNTER
     TASK_COUNTER += 1
-
-    text = build_task_text(idx, "ТЗ", dev, tester, desc, "new")
+    text = build_task_text(idx, "ТЗ", creator, dev, tester, desc, "new")
     kb = task_init_keyboard()
     if photo:
         msg = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
     else:
         msg = await bot.send_message(chat_id, text, reply_markup=kb)
-
-    arr = TASKS.setdefault(chat_id, [])
-    arr.append({
+    TASKS.setdefault(chat_id, []).append({
         "type": "ТЗ",
         "local_id": idx,
         "message_id": msg.message_id,
@@ -260,31 +252,226 @@ async def finalize_task_creation(chat_id: int, state: FSMContext):
     })
     await update_project_card(chat_id)
 
-#############################
-# Подтверждение/Редактирование/Удаление/Комментарии
-#############################
+####################################
+# Обработчики создания глюка
+####################################
+
+@dp.callback_query_handler(lambda c: c.data == "choose_glitch")
+async def on_choose_glitch(call: types.CallbackQuery, state: FSMContext):
+    try:
+        base = find_card(call.message.chat.id, call.message.message_id)
+        dev = base["dev"] if base else "@noDev"
+        test = base["tester"] if base else "@noTester"
+        await call.message.delete()
+        await state.update_data(glitch_dev=dev, glitch_tester=test)
+        ask = await bot.send_message(call.message.chat.id, "Отправьте картинку для Глюка или 'Пропустить':",
+                                     reply_markup=glitch_skip_image_keyboard())
+        await state.update_data(gl_ask_img=ask.message_id)
+        await NewGlitchStates.waiting_for_photo.set()
+        await call.answer("Переход к созданию глюка")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "skip_glitch_image", state=NewGlitchStates.waiting_for_photo)
+async def on_skip_gl_img(call: types.CallbackQuery, state: FSMContext):
+    try:
+        logging.info("skip_glitch_image: начало")
+        data = await state.get_data()
+        if data.get("gl_ask_img"):
+            try:
+                await bot.delete_message(call.message.chat.id, data["gl_ask_img"])
+                logging.info("skip_glitch_image: удалено gl_ask_img")
+            except MessageToDeleteNotFound:
+                logging.info("skip_glitch_image: gl_ask_img не найдено")
+            except Exception as e:
+                logging.error(f"skip_glitch_image: ошибка при удалении gl_ask_img: {e}")
+        try:
+            await call.message.delete()
+            logging.info("skip_glitch_image: сообщение удалено")
+        except MessageToDeleteNotFound:
+            logging.info("skip_glitch_image: сообщение не найдено")
+        except Exception as e:
+            logging.error(f"skip_glitch_image: ошибка при удалении сообщения: {e}")
+        await state.update_data(glitch_photo=None)
+        ask = await bot.send_message(call.message.chat.id, "Введите описание глюка:")
+        await state.update_data(gl_ask_desc=ask.message_id)
+        await NewGlitchStates.waiting_for_description.set()
+        await call.answer("Пропущено фото")
+        logging.info("skip_glitch_image: завершено")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+@dp.message_handler(state=NewGlitchStates.waiting_for_photo, content_types=types.ContentType.PHOTO)
+async def on_gl_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("gl_ask_img"):
+        try:
+            await bot.delete_message(message.chat.id, data["gl_ask_img"])
+        except:
+            pass
+    photo_id = message.photo[-1].file_id
+    await message.delete()
+    await state.update_data(glitch_photo=photo_id)
+    ask_desc = await message.answer("Введите описание глюка:")
+    await state.update_data(gl_ask_desc=ask_desc.message_id)
+    await NewGlitchStates.waiting_for_description.set()
+
+@dp.message_handler(state=NewGlitchStates.waiting_for_description, content_types=types.ContentType.TEXT)
+async def on_gl_desc(message: types.Message, state: FSMContext):
+    global GLITCH_COUNTER
+    data = await state.get_data()
+    dev = data.get("glitch_dev", "@noDev")
+    test = data.get("glitch_tester", "@noTester")
+    photo = data.get("glitch_photo")
+    if data.get("gl_ask_desc"):
+        try:
+            await bot.delete_message(message.chat.id, data["gl_ask_desc"])
+        except:
+            pass
+    await message.delete()
+    desc = message.text
+    idx = GLITCH_COUNTER
+    GLITCH_COUNTER += 1
+    # Для глюка считаем статус "work" по умолчанию
+    text = build_task_text(idx, "Глюк", "@unknown", dev, test, desc, "work")
+    kb = glitch_work_keyboard()
+    if photo:
+        new_msg = await message.answer_photo(photo, caption=text, reply_markup=kb)
+    else:
+        new_msg = await message.answer(text, reply_markup=kb)
+    TASKS.setdefault(message.chat.id, []).append({
+        "type": "Глюк",
+        "local_id": idx,
+        "message_id": new_msg.message_id,
+        "dev": dev,
+        "tester": test,
+        "desc": desc,
+        "photo": photo,
+        "status": "work"
+    })
+    await state.finish()
+
+####################################
+# Обработчики создания правки
+####################################
+
+@dp.callback_query_handler(lambda c: c.data == "choose_fix")
+async def on_choose_fix(call: types.CallbackQuery, state: FSMContext):
+    try:
+        base = find_card(call.message.chat.id, call.message.message_id)
+        dev = base["dev"] if base else "@noDev"
+        test = base["tester"] if base else "@noTester"
+        await call.message.delete()
+        await state.update_data(fix_dev=dev, fix_tester=test)
+        # Используем новую клавиатуру для правок с callback "skip_fix_image"
+        ask = await bot.send_message(call.message.chat.id, "Отправьте картинку для Правки или 'Пропустить':",
+                                     reply_markup=fix_skip_image_keyboard())
+        await state.update_data(fix_ask_img=ask.message_id)
+        await NewFixStates.waiting_for_photo.set()
+        await call.answer("Переход к созданию правки")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "skip_fix_image", state=NewFixStates.waiting_for_photo)
+async def skip_fix_image(call: types.CallbackQuery, state: FSMContext):
+    try:
+        logging.info("skip_fix_image: начало")
+        data = await state.get_data()
+        if data.get("fix_ask_img"):
+            try:
+                await bot.delete_message(call.message.chat.id, data["fix_ask_img"])
+                logging.info("skip_fix_image: удалено fix_ask_img")
+            except MessageToDeleteNotFound:
+                logging.info("skip_fix_image: fix_ask_img не найдено")
+            except Exception as e:
+                logging.error(f"skip_fix_image: ошибка при удалении fix_ask_img: {e}")
+        try:
+            await call.message.delete()
+            logging.info("skip_fix_image: сообщение удалено")
+        except MessageToDeleteNotFound:
+            logging.info("skip_fix_image: сообщение не найдено")
+        except Exception as e:
+            logging.error(f"skip_fix_image: ошибка при удалении сообщения: {e}")
+        await state.update_data(fix_photo=None)
+        ask = await bot.send_message(call.message.chat.id, "Введите описание Правки:")
+        await state.update_data(fix_ask_desc=ask.message_id)
+        await NewFixStates.waiting_for_description.set()
+        await call.answer("Пропущено фото")
+        logging.info("skip_fix_image: завершено")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+@dp.message_handler(state=NewFixStates.waiting_for_photo, content_types=types.ContentType.PHOTO)
+async def on_fix_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("fix_ask_img"):
+        try:
+            await bot.delete_message(message.chat.id, data["fix_ask_img"])
+        except:
+            pass
+    photo_id = message.photo[-1].file_id
+    await message.delete()
+    await state.update_data(fix_photo=photo_id)
+    ask = await message.answer("Введите описание Правки:")
+    await state.update_data(fix_ask_desc=ask.message_id)
+    await NewFixStates.waiting_for_description.set()
+
+@dp.message_handler(state=NewFixStates.waiting_for_description, content_types=types.ContentType.TEXT)
+async def on_fix_desc(message: types.Message, state: FSMContext):
+    global FIX_COUNTER
+    data = await state.get_data()
+    dev = data.get("fix_dev", "@noDev")
+    test = data.get("fix_tester", "@noTester")
+    photo = data.get("fix_photo")
+    if data.get("fix_ask_desc"):
+        try:
+            await bot.delete_message(message.chat.id, data["fix_ask_desc"])
+        except:
+            pass
+    await message.delete()
+    desc = message.text
+    idx = FIX_COUNTER
+    FIX_COUNTER += 1
+    text = build_task_text(idx, "Правка", "@unknown", dev, test, desc, "work")
+    kb = fix_work_keyboard()  # можно заменить на fix_work_keyboard или использовать glitch_work_keyboard, если одинаковы
+    if photo:
+        new_msg = await message.answer_photo(photo, caption=text, reply_markup=kb)
+    else:
+        new_msg = await message.answer(text, reply_markup=kb)
+    TASKS.setdefault(message.chat.id, []).append({
+        "type": "Правка",
+        "local_id": idx,
+        "message_id": new_msg.message_id,
+        "dev": dev,
+        "tester": test,
+        "desc": desc,
+        "photo": photo,
+        "status": "work"
+    })
+    await state.finish()
+
+####################################
+# Обработчики переходов и комментариев
+####################################
 
 @dp.callback_query_handler(lambda c: c.data == "task_confirm")
 async def on_task_confirm(call: types.CallbackQuery):
     msg = call.message
     old_txt = msg.caption if msg.photo else msg.text
-    kb = task_after_confirm_keyboard()  # зелёная/принять справа
+    kb = task_after_confirm_keyboard()
     try:
         if msg.photo:
             await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=old_txt, reply_markup=kb)
         else:
             await bot.edit_message_text(old_txt, msg.chat.id, msg.message_id, reply_markup=kb)
     except Exception as e:
-        print(f"Ошибка при confirm: {e}")
+        logging.error(f"Ошибка при confirm: {e}")
     await call.answer("Таск подтверждён")
 
 @dp.callback_query_handler(lambda c: c.data == "task_edit_init")
 async def on_task_edit_init(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
-    await state.update_data(
-        edit_chat_id=msg.chat.id,
-        edit_msg_id=msg.message_id
-    )
+    await state.update_data(edit_chat_id=msg.chat.id, edit_msg_id=msg.message_id)
     ask = await msg.answer("Введите новое описание (ТЗ):")
     await state.update_data(edit_ask_msg=ask.message_id)
     await EditTaskStates.waiting_for_new_task_text.set()
@@ -295,15 +482,13 @@ async def on_edit_task_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
     chat_id = data["edit_chat_id"]
     msg_id = data["edit_msg_id"]
-    ask_id = data["edit_ask_msg"]
-    if ask_id:
+    if data.get("edit_ask_msg"):
         try:
-            await bot.delete_message(chat_id, ask_id)
+            await bot.delete_message(chat_id, data["edit_ask_msg"])
         except:
             pass
     new_desc = message.text
     await message.delete()
-
     arr = TASKS.get(chat_id, [])
     card_obj = None
     for x in arr:
@@ -315,14 +500,12 @@ async def on_edit_task_text(message: types.Message, state: FSMContext):
     card_obj["desc"] = new_desc
     old_status = card_obj.get("status", "new")
     idx = card_obj["local_id"]
-    ttype = card_obj["type"]  # "ТЗ", "Глюк", "Правка"
+    ttype = card_obj["type"]
     dev = card_obj["dev"]
     test = card_obj["tester"]
     photo_id = card_obj["photo"]
-
-    text = build_task_text(idx, ttype, dev, test, new_desc, old_status)
-
-    # Восстанавливаем нужную клавиатуру
+    creator = PROJECTS[chat_id].get("creator_username", "@unknown")
+    text = build_task_text(idx, ttype, creator, dev, test, new_desc, old_status)
     if old_status == "new":
         kb = task_init_keyboard()
     elif old_status == "work":
@@ -332,20 +515,16 @@ async def on_edit_task_text(message: types.Message, state: FSMContext):
     elif old_status == "accept":
         kb = task_accept_keyboard()
     else:
-        kb = None  # closed?
-
+        kb = None
     try:
         if photo_id:
             await bot.edit_message_caption(chat_id, msg_id, caption=text, reply_markup=kb)
         else:
             await bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
     except Exception as e:
-        print(f"Ошибка редактирования: {e}")
-
-    # Если это "ТЗ" – обновляем карточку проекта
+        logging.error(f"Ошибка редактирования: {e}")
     if ttype == "ТЗ":
         await update_project_card(chat_id)
-
     await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data == "task_delete_init")
@@ -355,8 +534,6 @@ async def on_task_delete_init(call: types.CallbackQuery):
         arr = TASKS.setdefault(call.message.chat.id, [])
         arr = [x for x in arr if x["message_id"] != call.message.message_id]
         TASKS[call.message.chat.id] = arr
-        # Обновляем проект, если это "ТЗ"
-        # Или просто вызываем update_project_card
         await update_project_card(call.message.chat.id)
         await call.answer("Таск удалён.")
     except Exception as e:
@@ -365,13 +542,11 @@ async def on_task_delete_init(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "task_comment")
 async def on_task_comment(call: types.CallbackQuery, state: FSMContext):
     msg = call.message
-    old = msg.caption if msg.photo else msg.text
-    kb = msg.reply_markup
     await state.update_data(
         comment_chat_id=msg.chat.id,
         comment_msg_id=msg.message_id,
-        old_text=old,
-        old_kb=kb,
+        old_text=(msg.caption if msg.photo else msg.text),
+        old_kb=msg.reply_markup,
         is_photo=bool(msg.photo)
     )
     ask = await msg.answer("Введите комментарий:")
@@ -384,38 +559,27 @@ async def on_comment_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
     chat_id = data["comment_chat_id"]
     msg_id = data["comment_msg_id"]
-    old_text = data["old_text"]
-    kb = data["old_kb"]
-    is_photo = data["is_photo"]
-    ask_cmt_id = data.get("comment_ask_id")
-    if ask_cmt_id:
-        try:
-            await bot.delete_message(chat_id, ask_cmt_id)
-        except:
-            pass
-    user = "@" + (message.from_user.username or "unknown")
-    new_txt = old_text + f"\nКомментарий({user}): {message.text}"
+    new_txt = data["old_text"] + f"\nКомментарий(@{message.from_user.username or 'unknown'}): {message.text}"
     await message.delete()
-
     try:
-        if is_photo:
-            await bot.edit_message_caption(chat_id, msg_id, caption=new_txt, reply_markup=kb)
+        if data["is_photo"]:
+            await bot.edit_message_caption(chat_id, msg_id, caption=new_txt, reply_markup=data["old_kb"])
         else:
-            await bot.edit_message_text(new_txt, chat_id, msg_id, reply_markup=kb)
+            await bot.edit_message_text(new_txt, chat_id, msg_id, reply_markup=data["old_kb"])
     except Exception as e:
         await message.answer(f"Ошибка комментария: {e}")
     await state.finish()
 
 #############################
-# Статусы (В работу, Сделано, Работает, Принято)
+# Переходы статусов для ТЗ
 #############################
 
 @dp.callback_query_handler(lambda c: c.data == "task_in_work")
-async def on_task_in_work(call: types.CallbackQuery):
+async def on_task_in_work_main(call: types.CallbackQuery):
     msg = call.message
     old = msg.caption if msg.photo else msg.text
     new_txt = old + "\n#work"
-    kb = task_work_keyboard()  # галочка справа
+    kb = task_work_keyboard()
     try:
         if msg.photo:
             await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt, reply_markup=kb)
@@ -433,27 +597,24 @@ async def on_task_in_work(call: types.CallbackQuery):
 async def on_task_done(call: types.CallbackQuery):
     msg = call.message
     old = msg.caption if msg.photo else msg.text
-    new_txt = old + "\n#test"
-    kb = task_test_keyboard()  # работет справа
-    try:
-        if msg.photo:
-            await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt, reply_markup=kb)
-        else:
-            await bot.edit_message_text(new_txt, msg.chat.id, msg.message_id, reply_markup=kb)
-    except Exception as e:
-        await call.answer(f"Ошибка: {e}", show_alert=True)
-        return
     card_obj = find_card(msg.chat.id, msg.message_id)
-    if card_obj:
+    if not card_obj:
+        await call.answer("Объект не найден", show_alert=True)
+        return
+    current_status = card_obj.get("status", "new")
+    if current_status == "work":
+        new_txt = old + "\n#test"
+        kb = task_test_keyboard()
         card_obj["status"] = "test"
-    await call.answer("Таск -> test")
-
-@dp.callback_query_handler(lambda c: c.data == "task_accept")
-async def on_task_accept(call: types.CallbackQuery):
-    msg = call.message
-    old = msg.caption if msg.photo else msg.text
-    new_txt = old + "\n#accept"
-    kb = task_accept_keyboard()  # принято справа
+        ans = "Таск -> test"
+    elif current_status == "test":
+        new_txt = old + "\n#accept"
+        kb = task_accept_keyboard()
+        card_obj["status"] = "accept"
+        ans = "Таск -> accept"
+    else:
+        await call.answer("Неверный переход", show_alert=True)
+        return
     try:
         if msg.photo:
             await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt, reply_markup=kb)
@@ -462,10 +623,19 @@ async def on_task_accept(call: types.CallbackQuery):
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
         return
-    card_obj = find_card(msg.chat.id, msg.message_id)
-    if card_obj:
-        card_obj["status"] = "accept"
-    await call.answer("Таск -> accept")
+    await call.answer(ans)
+
+@dp.callback_query_handler(lambda c: c.data == "task_reject_choice")
+async def on_task_reject_main(call: types.CallbackQuery):
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
+
+@dp.callback_query_handler(lambda c: c.data == "task_fail_choice")
+async def on_task_fail_main(call: types.CallbackQuery):
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
 
 @dp.callback_query_handler(lambda c: c.data == "task_closed")
 async def on_task_closed(call: types.CallbackQuery):
@@ -486,214 +656,30 @@ async def on_task_closed(call: types.CallbackQuery):
     await call.answer("Таск закрыт.")
 
 #############################
-# Не сделано / Не работает => Глюк / Правка
+# Переходы статусов для глюков
 #############################
 
-@dp.callback_query_handler(lambda c: c.data == "task_reject_choice")
-async def on_task_reject(call: types.CallbackQuery):
-    kb = glitch_or_fix_keyboard()
-    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "task_fail_choice")
-async def on_task_fail(call: types.CallbackQuery):
-    kb = glitch_or_fix_keyboard()
-    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
-    await call.answer()
-
-#############################
-# Глюк (idx=GLITCH_COUNTER), dev/test из исходной карточки
-#############################
-
-@dp.callback_query_handler(lambda c: c.data == "choose_glitch")
-async def on_choose_glitch(call: types.CallbackQuery, state: FSMContext):
-    base = find_card(call.message.chat.id, call.message.message_id)
-    dev = base["dev"] if base else "@noDev"
-    test = base["tester"] if base else "@noTester"
-    await call.message.delete()
-    await state.update_data(glitch_dev=dev, glitch_tester=test)
-    ask = await call.message.answer("Отправьте картинку для Глюка или 'Пропустить':",
-                                    reply_markup=glitch_skip_image_keyboard())
-    await state.update_data(gl_ask_img=ask.message_id)
-    await NewGlitchStates.waiting_for_photo.set()
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "skip_glitch_image", state=NewGlitchStates.waiting_for_photo)
-async def on_skip_gl_img(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    ask_img = data.get("gl_ask_img")
-    if ask_img:
-        try:
-            await bot.delete_message(call.message.chat.id, ask_img)
-        except:
-            pass
-    try:
-        await call.message.delete()
-    except:
-        pass
-    await state.update_data(glitch_photo=None)
-    ask_desc = await call.message.answer("Введите описание глюка:")
-    await state.update_data(gl_ask_desc=ask_desc.message_id)
-    await NewGlitchStates.waiting_for_description.set()
-    await call.answer()
-
-@dp.message_handler(state=NewGlitchStates.waiting_for_photo, content_types=types.ContentType.PHOTO)
-async def on_gl_photo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    ask_img = data.get("gl_ask_img")
-    if ask_img:
-        try:
-            await bot.delete_message(message.chat.id, ask_img)
-        except:
-            pass
-    photo_id = message.photo[-1].file_id
-    await message.delete()
-    await state.update_data(glitch_photo=photo_id)
-    ask_desc = await message.answer("Введите описание глюка:")
-    await state.update_data(gl_ask_desc=ask_desc.message_id)
-    await NewGlitchStates.waiting_for_description.set()
-
-@dp.message_handler(state=NewGlitchStates.waiting_for_description, content_types=types.ContentType.TEXT)
-async def on_gl_desc(message: types.Message, state: FSMContext):
-    global GLITCH_COUNTER
-    data = await state.get_data()
-    dev = data["glitch_dev"]
-    test = data["glitch_tester"]
-    photo = data.get("glitch_photo")
-    ask_desc = data.get("gl_ask_desc")
-    if ask_desc:
-        try:
-            await bot.delete_message(message.chat.id, ask_desc)
-        except:
-            pass
-    await message.delete()
-    desc = message.text
-
-    idx = GLITCH_COUNTER
-    GLITCH_COUNTER += 1
-
-    text = build_task_text(idx, "Глюк", dev, test, desc, "work")
-    kb = glitch_work_keyboard()  # зелёная (Исправлено) справа
-    if photo:
-        msg = await message.answer_photo(photo, caption=text, reply_markup=kb)
-    else:
-        msg = await message.answer(text, reply_markup=kb)
-
-    arr = TASKS.setdefault(message.chat.id, [])
-    arr.append({
-        "type": "Глюк",
-        "local_id": idx,
-        "message_id": msg.message_id,
-        "dev": dev,
-        "tester": test,
-        "desc": desc,
-        "photo": photo,
-        "status": "work"
-    })
-    # Не добавляем в карточку проекта
-    await state.finish()
-
-#############################
-# Правка (idx=FIX_COUNTER), dev/test из исходной карточки
-#############################
-
-@dp.callback_query_handler(lambda c: c.data == "choose_fix")
-async def on_choose_fix(call: types.CallbackQuery, state: FSMContext):
-    base = find_card(call.message.chat.id, call.message.message_id)
-    dev = base["dev"] if base else "@noDev"
-    test = base["tester"] if base else "@noTester"
-    await call.message.delete()
-    await state.update_data(fix_dev=dev, fix_tester=test)
-    ask = await call.message.answer("Отправьте картинку для Правки или 'Пропустить':",
-                                    reply_markup=glitch_skip_image_keyboard())
-    await state.update_data(fix_ask_img=ask.message_id)
-    await NewFixStates.waiting_for_photo.set()
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "skip_glitch_image", state=NewFixStates.waiting_for_photo)
-async def on_skip_fix_img(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    ask_img = data.get("fix_ask_img")
-    if ask_img:
-        try:
-            await bot.delete_message(call.message.chat.id, ask_img)
-        except:
-            pass
-    try:
-        await call.message.delete()
-    except:
-        pass
-    await state.update_data(fix_photo=None)
-    ask_d = await call.message.answer("Введите описание Правки:")
-    await state.update_data(fix_ask_desc=ask_d.message_id)
-    await NewFixStates.waiting_for_description.set()
-    await call.answer()
-
-@dp.message_handler(state=NewFixStates.waiting_for_photo, content_types=types.ContentType.PHOTO)
-async def on_fix_photo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    ask_img = data.get("fix_ask_img")
-    if ask_img:
-        try:
-            await bot.delete_message(message.chat.id, ask_img)
-        except:
-            pass
-    photo_id = message.photo[-1].file_id
-    await message.delete()
-    await state.update_data(fix_photo=photo_id)
-    ask_desc = await message.answer("Введите описание Правки:")
-    await state.update_data(fix_ask_desc=ask_desc.message_id)
-    await NewFixStates.waiting_for_description.set()
-
-@dp.message_handler(state=NewFixStates.waiting_for_description, content_types=types.ContentType.TEXT)
-async def on_fix_desc(message: types.Message, state: FSMContext):
-    global FIX_COUNTER
-    data = await state.get_data()
-    dev = data["fix_dev"]
-    test = data["fix_tester"]
-    photo = data.get("fix_photo")
-    ask_desc = data.get("fix_ask_desc")
-    if ask_desc:
-        try:
-            await bot.delete_message(message.chat.id, ask_desc)
-        except:
-            pass
-    await message.delete()
-    desc = message.text
-
-    idx = FIX_COUNTER
-    FIX_COUNTER += 1
-
-    text = build_task_text(idx, "Правка", dev, test, desc, "work")
-    kb = glitch_work_keyboard()  # Исправлено справа
-    if photo:
-        msg = await message.answer_photo(photo, caption=text, reply_markup=kb)
-    else:
-        msg = await message.answer(text, reply_markup=kb)
-
-    arr = TASKS.setdefault(message.chat.id, [])
-    arr.append({
-        "type": "Правка",
-        "local_id": idx,
-        "message_id": msg.message_id,
-        "dev": dev,
-        "tester": test,
-        "desc": desc,
-        "photo": photo,
-        "status": "work"
-    })
-    await state.finish()
-
-#############################
-# Исправлено (glitch_fixed)
-#############################
-
-@dp.callback_query_handler(lambda c: c.data == "glitch_fixed")
-async def on_glitch_fixed(call: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data == "glitch_done")
+async def on_glitch_done(call: types.CallbackQuery):
     msg = call.message
-    old_txt = msg.caption if msg.photo else msg.text
-    new_txt = old_txt + f"\n#accept\nИсправлено: {now_str()}"
-    kb = glitch_accept_keyboard()  # Принято справа
+    old = msg.caption if msg.photo else msg.text
+    card_obj = find_card(msg.chat.id, msg.message_id)
+    if not card_obj:
+        await call.answer("Объект не найден", show_alert=True)
+        return
+    if card_obj.get("status", "new") == "work":
+        new_txt = old + "\n#test"
+        kb = glitch_test_keyboard()
+        card_obj["status"] = "test"
+        ans = "Глюк -> test"
+    elif card_obj.get("status") == "test":
+        new_txt = old + "\n#accept"
+        kb = glitch_accept_keyboard()
+        card_obj["status"] = "accept"
+        ans = "Глюк -> accept"
+    else:
+        await call.answer("Неверный переход", show_alert=True)
+        return
     try:
         if msg.photo:
             await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt, reply_markup=kb)
@@ -702,54 +688,25 @@ async def on_glitch_fixed(call: types.CallbackQuery):
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
         return
-    obj = find_card(msg.chat.id, msg.message_id)
-    if obj:
-        obj["status"] = "accept"
-    await call.answer("Исправлено -> accept")
+    await call.answer(ans)
 
-@dp.callback_query_handler(lambda c: c.data == "glitch_comment")
-async def on_glitch_comment(call: types.CallbackQuery, state: FSMContext):
-    msg = call.message
-    old = msg.caption if msg.photo else msg.text
-    kb = msg.reply_markup
-    await state.update_data(
-        comment_chat_id=msg.chat.id,
-        comment_msg_id=msg.message_id,
-        old_text=old,
-        old_kb=kb,
-        is_photo=bool(msg.photo)
-    )
-    ask = await msg.answer("Введите комментарий для Глюка/Правки:")
-    await state.update_data(comment_ask_id=ask.message_id)
-    await CommentStates.waiting_for_comment_text.set()
-    await call.answer()
+@dp.callback_query_handler(lambda c: c.data == "glitch_reject_choice")
+async def on_glitch_reject(call: types.CallbackQuery):
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
 
-@dp.callback_query_handler(lambda c: c.data == "glitch_fail")
+@dp.callback_query_handler(lambda c: c.data == "glitch_fail_choice")
 async def on_glitch_fail(call: types.CallbackQuery):
-    """
-    Не работает => создаём новую правку
-    """
-    base_obj = find_card(call.message.chat.id, call.message.message_id)
-    dev = base_obj["dev"] if base_obj else "@noDev"
-    test = base_obj["tester"] if base_obj else "@noTester"
-
-    await call.message.delete()
-    await call.answer("Создаём новую правку...")
-
-    from states.bot_states import NewFixStates
-    s = dp.current_state(chat=call.message.chat.id, user=call.from_user.id)
-    await s.update_data(fix_dev=dev, fix_tester=test)
-
-    ask = await call.message.answer("Отправьте картинку для Правки или 'Пропустить':",
-                                    reply_markup=glitch_skip_image_keyboard())
-    await s.update_data(fix_ask_img=ask.message_id)
-    await s.set_state(NewFixStates.waiting_for_photo)
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
 
 @dp.callback_query_handler(lambda c: c.data == "glitch_closed")
 async def on_glitch_closed(call: types.CallbackQuery):
     msg = call.message
     old = msg.caption if msg.photo else msg.text
-    new_txt = old + "\nПринято!"
+    new_txt = old + "\n#closed\nГлюк завершён."
     try:
         if msg.photo:
             await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt)
@@ -758,7 +715,108 @@ async def on_glitch_closed(call: types.CallbackQuery):
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
         return
-    obj = find_card(msg.chat.id, msg.message_id)
-    if obj:
-        obj["status"] = "closed"
-    await call.answer("Глюк/Правка закрыта")
+    card_obj = find_card(msg.chat.id, msg.message_id)
+    if card_obj:
+        card_obj["status"] = "closed"
+    await call.answer("Глюк закрыт.")
+
+#############################
+# Переходы статусов для правок
+#############################
+
+@dp.callback_query_handler(lambda c: c.data == "fix_done")
+async def on_fix_done(call: types.CallbackQuery):
+    msg = call.message
+    old = msg.caption if msg.photo else msg.text
+    card_obj = find_card(msg.chat.id, msg.message_id)
+    if not card_obj:
+        await call.answer("Объект не найден", show_alert=True)
+        return
+    if card_obj.get("status", "new") == "work":
+        new_txt = old + "\n#test"
+        kb = fix_test_keyboard()
+        card_obj["status"] = "test"
+        ans = "Правка -> test"
+    elif card_obj.get("status") == "test":
+        new_txt = old + "\n#accept"
+        kb = fix_accept_keyboard()
+        card_obj["status"] = "accept"
+        ans = "Правка -> accept"
+    else:
+        await call.answer("Неверный переход", show_alert=True)
+        return
+    try:
+        if msg.photo:
+            await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt, reply_markup=kb)
+        else:
+            await bot.edit_message_text(new_txt, msg.chat.id, msg.message_id, reply_markup=kb)
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    await call.answer(ans)
+
+@dp.callback_query_handler(lambda c: c.data == "fix_reject_choice")
+async def on_fix_reject(call: types.CallbackQuery):
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
+
+@dp.callback_query_handler(lambda c: c.data == "fix_fail_choice")
+async def on_fix_fail(call: types.CallbackQuery):
+    kb = glitch_or_fix_keyboard()
+    await call.message.answer("Что создать: Глюк или Правка?", reply_markup=kb)
+    await call.answer("Переход к созданию глюка/правки")
+
+@dp.callback_query_handler(lambda c: c.data == "fix_closed")
+async def on_fix_closed(call: types.CallbackQuery):
+    msg = call.message
+    old = msg.caption if msg.photo else msg.text
+    new_txt = old + "\n#closed\nПравка завершена."
+    try:
+        if msg.photo:
+            await bot.edit_message_caption(msg.chat.id, msg.message_id, caption=new_txt)
+        else:
+            await bot.edit_message_text(new_txt, msg.chat.id, msg.message_id)
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+        return
+    card_obj = find_card(msg.chat.id, msg.message_id)
+    if card_obj:
+        card_obj["status"] = "closed"
+    await call.answer("Правка закрыта.")
+
+#############################
+# Обработчики выбора создания глюка и правок
+#############################
+
+@dp.callback_query_handler(lambda c: c.data == "choose_glitch")
+async def on_choose_glitch(call: types.CallbackQuery, state: FSMContext):
+    try:
+        base = find_card(call.message.chat.id, call.message.message_id)
+        dev = base["dev"] if base else "@noDev"
+        test = base["tester"] if base else "@noTester"
+        await call.message.delete()
+        await state.update_data(glitch_dev=dev, glitch_tester=test)
+        ask = await bot.send_message(call.message.chat.id, "Отправьте картинку для Глюка или 'Пропустить':",
+                                     reply_markup=glitch_skip_image_keyboard())
+        await state.update_data(gl_ask_img=ask.message_id)
+        await NewGlitchStates.waiting_for_photo.set()
+        await call.answer("Переход к созданию глюка")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "choose_fix")
+async def on_choose_fix(call: types.CallbackQuery, state: FSMContext):
+    try:
+        base = find_card(call.message.chat.id, call.message.message_id)
+        dev = base["dev"] if base else "@noDev"
+        test = base["tester"] if base else "@noTester"
+        await call.message.delete()
+        await state.update_data(fix_dev=dev, fix_tester=test)
+        ask = await bot.send_message(call.message.chat.id, "Отправьте картинку для Правки или 'Пропустить':",
+                                     reply_markup=fix_skip_image_keyboard())
+        await state.update_data(fix_ask_img=ask.message_id)
+        await NewFixStates.waiting_for_photo.set()
+        await call.answer("Переход к созданию правки")
+    except Exception as e:
+        await call.answer(f"Ошибка: {e}", show_alert=True)
