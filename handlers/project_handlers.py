@@ -1,4 +1,5 @@
 import datetime
+import logging
 from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command
@@ -13,6 +14,8 @@ from states.bot_states import (
 from keyboards.keyboards import (
     project_skip_image_keyboard
 )
+
+logging.basicConfig(level=logging.INFO)
 
 #############################
 # Глобальный словарь проектов
@@ -103,12 +106,47 @@ async def update_project_message(chat_id, proj):
             media = types.InputMediaPhoto(proj["photo_id"], caption=text)
             await bot.edit_message_media(media, chat_id, proj["message_id"], reply_markup=keyboard)
         else:
-            await bot.edit_message_text(text, chat_id, proj["message_id"], reply_markup=keyboard,  disable_web_page_preview=True)
+            await bot.edit_message_text(text, chat_id, proj["message_id"], reply_markup=keyboard, disable_web_page_preview=True)
     except Exception as e:
         if "Message is not modified" in str(e):
             pass
         else:
             print(f"Ошибка обновления карточки: {e}")
+
+# Заглушка для получения user_id по username.
+# Замените эту функцию на реальную логику получения user_id.
+async def get_user_id_by_username(username: str) -> int:
+    return 123456789  # Фиктивное значение
+
+async def send_invite_if_not_in_chat(chat_id: int, username: str):
+    """
+    Если пользователь с данным username не состоит в чате,
+    отправляет сообщение в чат с приглашительной ссылкой и кнопкой "Закрыть".
+    """
+    try:
+        user_id = await get_user_id_by_username(username)
+        # Проверяем, является ли пользователь участником чата.
+        await bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        try:
+            invite_link = await bot.export_chat_invite_link(chat_id)
+        except Exception as e:
+            invite_link = "Не удалось получить ссылку"
+        invite_text = f"Если пользователь {username} не в чате, то отправьте ему .\nпригласительная ссылку: {invite_link}"
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Закрыть", callback_data="close_invite_msg"))
+        await bot.send_message(chat_id, invite_text, reply_markup=kb, disable_web_page_preview=True)
+
+@dp.callback_query_handler(lambda c: c.data == "close_invite_msg")
+async def on_close_invite_msg(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
+
+####################################
+# Создание основного проекта
+####################################
 
 @dp.message_handler(Command("newProject"))
 async def cmd_new_project(message: types.Message, state: FSMContext):
@@ -135,10 +173,8 @@ async def cmd_new_project(message: types.Message, state: FSMContext):
         await bot.pin_chat_message(message.chat.id, msg.message_id)
     except Exception as e:
         print(f"Не удалось закрепить: {e}")
-
     proj["message_id"] = msg.message_id
     PROJECTS[message.chat.id] = proj
-
     ask_name = await message.answer("Введите название проекта:")
     await state.update_data(ask_name_id=ask_name.message_id)
     await NewProjectStates.waiting_for_project_name.set()
@@ -154,13 +190,10 @@ async def on_project_name(message: types.Message, state: FSMContext):
             pass
     name = message.text
     await message.delete()
-
     proj = PROJECTS.get(message.chat.id, {})
     proj["name"] = name
     PROJECTS[message.chat.id] = proj
-
     await update_project_message(message.chat.id, proj)
-
     ask_desc = await message.answer("Введите описание проекта:")
     await state.update_data(ask_desc_id=ask_desc.message_id)
     await NewProjectStates.waiting_for_project_description.set()
@@ -176,17 +209,30 @@ async def on_project_desc(message: types.Message, state: FSMContext):
             pass
     desc = message.text
     await message.delete()
-
     proj = PROJECTS.get(message.chat.id, {})
     proj["desc"] = desc
     PROJECTS[message.chat.id] = proj
-
     await update_project_message(message.chat.id, proj)
-
-    ask_img = await message.answer("Отправьте картинку или 'Пропустить':",
-                                   reply_markup=project_skip_image_keyboard())
+    ask_img = await message.answer("Отправьте картинку или 'Пропустить':", reply_markup=project_skip_image_keyboard())
     await state.update_data(ask_img_id=ask_img.message_id)
     await NewProjectStates.waiting_for_project_image.set()
+
+@dp.message_handler(state=NewProjectStates.waiting_for_project_image, content_types=types.ContentType.PHOTO)
+async def on_project_image(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    ask_img_id = data.get("ask_img_id")
+    if ask_img_id:
+        try:
+            await bot.delete_message(message.chat.id, ask_img_id)
+        except Exception:
+            pass
+    photo_id = message.photo[-1].file_id
+    await message.delete()
+    proj = PROJECTS.get(message.chat.id, {})
+    proj["photo_id"] = photo_id
+    PROJECTS[message.chat.id] = proj
+    await update_project_message(message.chat.id, proj)
+    await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data == "skip_project_image", state=NewProjectStates.waiting_for_project_image)
 async def skip_project_image(call: types.CallbackQuery, state: FSMContext):
@@ -201,32 +247,10 @@ async def skip_project_image(call: types.CallbackQuery, state: FSMContext):
         await call.message.delete()
     except Exception:
         pass
-
-    # Обновляем сообщение карточки (картинка не установлена)
     proj = PROJECTS.get(call.message.chat.id, {})
     PROJECTS[call.message.chat.id] = proj
     await update_project_message(call.message.chat.id, proj)
-
     await call.answer("Пропущена картинка")
-    await state.finish()
-
-@dp.message_handler(state=NewProjectStates.waiting_for_project_image, content_types=types.ContentType.PHOTO)
-async def on_project_image(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    ask_img_id = data.get("ask_img_id")
-    if ask_img_id:
-        try:
-            await bot.delete_message(message.chat.id, ask_img_id)
-        except Exception:
-            pass
-    photo_id = message.photo[-1].file_id
-    await message.delete()
-
-    proj = PROJECTS.get(message.chat.id, {})
-    proj["photo_id"] = photo_id
-    PROJECTS[message.chat.id] = proj
-
-    await update_project_message(message.chat.id, proj)
     await state.finish()
 
 ########################################
@@ -248,7 +272,6 @@ async def cmd_team(message: types.Message):
     if user != proj["creator_username"]:
         await message.answer("Только создатель проекта может управлять командой.")
         return
-
     kb = InlineKeyboardMarkup()
     kb.add(
         InlineKeyboardButton("Разработчик", callback_data="team_add_developer"),
@@ -268,7 +291,6 @@ async def on_team_close(call: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "team_add_developer")
 async def on_add_dev(call: types.CallbackQuery, state: FSMContext):
     proj = PROJECTS.get(call.message.chat.id)
-    # Ограничение: только создатель проекта может добавлять участников
     if not is_project_creator(call, proj):
         await call.answer("Только создатель проекта может управлять командой.", show_alert=True)
         return
@@ -277,7 +299,9 @@ async def on_add_dev(call: types.CallbackQuery, state: FSMContext):
     except Exception:
         pass
     ask = await bot.send_message(call.message.chat.id, "Введите @username разработчика:")
-    await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(team_role="developer", team_prompt_msg=ask.message_id)
+    await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(
+        team_role="developer", team_prompt_msg=ask.message_id
+    )
     await ProjectTeamStates.waiting_for_team_username.set()
     await call.answer()
 
@@ -292,7 +316,9 @@ async def on_add_tester(call: types.CallbackQuery, state: FSMContext):
     except Exception:
         pass
     ask = await bot.send_message(call.message.chat.id, "Введите @username тестировщика:")
-    await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(team_role="tester", team_prompt_msg=ask.message_id)
+    await dp.current_state(chat=call.message.chat.id, user=call.from_user.id).update_data(
+        team_role="tester", team_prompt_msg=ask.message_id
+    )
     await ProjectTeamStates.waiting_for_team_username.set()
     await call.answer()
 
@@ -310,14 +336,16 @@ async def on_team_username(message: types.Message, state: FSMContext):
             await bot.delete_message(message.chat.id, team_prompt_msg)
         except Exception:
             pass
-    text = f"Вы хотите добавить {username_candidate} в " + ("разработчики?" if data.get("team_role") == "developer" else "тестеры?")
+    text = f"Вы хотите добавить {username_candidate} в " + (
+        "разработчики?" if data.get("team_role") == "developer" else "тестеры?"
+    )
     kb = InlineKeyboardMarkup()
     kb.add(
         InlineKeyboardButton("Нет, изменить", callback_data="team_change_username"),
         InlineKeyboardButton("Да", callback_data="team_confirm_username")
     )
     await state.update_data(team_username_candidate=username_candidate)
-    await bot.send_message(message.chat.id, text, reply_markup=kb,  disable_web_page_preview=True)
+    await bot.send_message(message.chat.id, text, reply_markup=kb, disable_web_page_preview=True)
     await ProjectTeamStates.waiting_for_team_confirmation.set()
 
 @dp.callback_query_handler(lambda c: c.data == "team_change_username", state=ProjectTeamStates.waiting_for_team_confirmation)
@@ -358,6 +386,26 @@ async def on_team_confirm_username(call: types.CallbackQuery, state: FSMContext)
     await update_project_message(call.message.chat.id, proj)
     await state.finish()
     await call.answer("Пользователь добавлен")
+    # Если пользователя нет в чате, выводим сообщение с приглашением.
+    try:
+        user_id = await get_user_id_by_username(username_candidate)
+        await bot.get_chat_member(call.message.chat.id, user_id)
+    except Exception:
+        try:
+            invite_link = await bot.export_chat_invite_link(call.message.chat.id)
+        except Exception as e:
+            invite_link = "Не удалось получить ссылку"
+        invite_text = f"Если пользователя {username_candidate} нет в чате, то отправьте ему \nпригласительную ссылку: {invite_link}"
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Закрыть", callback_data="close_invite_msg"))
+        await bot.send_message(call.message.chat.id, invite_text, reply_markup=kb, disable_web_page_preview=True)
+
+@dp.callback_query_handler(lambda c: c.data == "close_invite_msg")
+async def on_close_invite_msg(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
 
 ########################################
 # Остальные обработчики (редактирование, подтверждение и т.д.)
@@ -415,7 +463,7 @@ async def on_project_confirm(call: types.CallbackQuery):
         return
     if not is_project_creator(call, proj):
         await call.answer("Только создатель проекта может подтверждать его.", show_alert=True)
-        return
+
     proj["confirmed"] = True
     PROJECTS[call.message.chat.id] = proj
     await update_project_message(call.message.chat.id, proj)

@@ -54,7 +54,7 @@ def task_work_keyboard():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("💬", callback_data="task_comment"),
-        types.InlineKeyboardButton("🟡✅", callback_data="task_done")
+        types.InlineKeyboardButton("🟡Сделано", callback_data="task_done")
     )
     return kb
 
@@ -67,9 +67,9 @@ def task_test_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🟠❌", callback_data="task_reject_choice"),
-        types.InlineKeyboardButton("💬", callback_data="task_comment"),
-        types.InlineKeyboardButton("🟠✅", callback_data="task_done")
+        types.InlineKeyboardButton("🟠Не сделано", callback_data="task_reject_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="task_comment"),
+        types.InlineKeyboardButton("🟠Сделано", callback_data="task_done")
     )
     return kb
 
@@ -82,9 +82,9 @@ def task_accept_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🔴❌", callback_data="task_fail_choice"),
-        types.InlineKeyboardButton("💬", callback_data="task_comment"),
-        types.InlineKeyboardButton("🔴✅", callback_data="task_closed")
+        types.InlineKeyboardButton("🔴Не сделано", callback_data="task_fail_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="task_comment"),
+        types.InlineKeyboardButton("🔴Сделано", callback_data="task_closed")
 
     )
     return kb
@@ -111,7 +111,7 @@ def glitch_work_keyboard():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("💬 Комментарий", callback_data="glitch_comment"),
-        types.InlineKeyboardButton("🔵✅", callback_data="glitch_done")
+        types.InlineKeyboardButton("🔵Сделано", callback_data="glitch_done")
     )
     return kb
 
@@ -121,9 +121,9 @@ def glitch_test_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🟦❌", callback_data="glitch_reject_choice"),
-        types.InlineKeyboardButton("💬 Комментарий", callback_data="glitch_comment"),
-        types.InlineKeyboardButton("🟦✅", callback_data="glitch_done")
+        types.InlineKeyboardButton("🟦Не сделано", callback_data="glitch_reject_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="glitch_comment"),
+        types.InlineKeyboardButton("🟦Сделано", callback_data="glitch_done")
     )
     return kb
 
@@ -133,9 +133,9 @@ def glitch_accept_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🟣❌", callback_data="glitch_fail_choice"),
-        types.InlineKeyboardButton("💬 Комментарий", callback_data="glitch_comment"),
-        types.InlineKeyboardButton("🟣✅", callback_data="glitch_closed")
+        types.InlineKeyboardButton("🟣Не сделано", callback_data="glitch_fail_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="glitch_comment"),
+        types.InlineKeyboardButton("🟣Сделано", callback_data="glitch_closed")
     )
     return kb
 
@@ -146,8 +146,8 @@ def fix_work_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("💬 Комментарий", callback_data="fix_comment"),
-        types.InlineKeyboardButton("🔵✅", callback_data="fix_done")
+        types.InlineKeyboardButton("💬Комментарий", callback_data="fix_comment"),
+        types.InlineKeyboardButton("🔵Сделано", callback_data="fix_done")
     )
     return kb
 
@@ -157,9 +157,9 @@ def fix_test_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🟦❌", callback_data="fix_reject_choice"),
-        types.InlineKeyboardButton("💬 Комментарий", callback_data="fix_comment"),
-        types.InlineKeyboardButton("🟦✅", callback_data="fix_done")
+        types.InlineKeyboardButton("🟦Не сделано", callback_data="fix_reject_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="fix_comment"),
+        types.InlineKeyboardButton("🟦Сделано", callback_data="fix_done")
     )
     return kb
 
@@ -169,9 +169,9 @@ def fix_accept_keyboard():
     """
     kb = types.InlineKeyboardMarkup(row_width=3)
     kb.add(
-        types.InlineKeyboardButton("🟣❌", callback_data="fix_fail_choice"),
-        types.InlineKeyboardButton("💬 Комментарий", callback_data="fix_comment"),
-        types.InlineKeyboardButton("🟣✅", callback_data="fix_closed")
+        types.InlineKeyboardButton("🟣Не сделано", callback_data="fix_fail_choice"),
+        types.InlineKeyboardButton("💬Комментарий", callback_data="fix_comment"),
+        types.InlineKeyboardButton("🟣Сделано", callback_data="fix_closed")
     )
     return kb
 
@@ -185,4 +185,19 @@ def task_skip_image_keyboard():
 def fix_skip_image_keyboard():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("Пропустить", callback_data="skip_fix_image"))
+    return kb
+def glitch_rework_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("💬 Комментарий", callback_data="glitch_comment"),
+        types.InlineKeyboardButton("🟢 Исправлено", callback_data="glitch_fixed")
+    )
+    return kb
+
+def glitch_retest_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🔴 Не работает", callback_data="glitch_fail"),
+        types.InlineKeyboardButton("🟢 Принять", callback_data="glitch_accept")
+    )
     return kb
